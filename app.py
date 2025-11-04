@@ -73,10 +73,24 @@ def index():
     offset = 0
     limit = 50
     while True:
+        # We need to fetch images, so we can't just use current_user_playlists
         results = sp.current_user_playlists(limit=limit, offset=offset)
         if not results['items']:
             break
-        playlists.extend(results['items'])
+        
+        # Manually fetch full playlist details to get images (which current_user_playlists sometimes omits)
+        # We can optimize this later if needed, but this is more reliable
+        full_playlist_items = []
+        for item in results['items']:
+             # We need fields for name, id, images, and tracks.total
+            try:
+                pl = sp.playlist(item['id'], fields="id,name,images,tracks.total")
+                full_playlist_items.append(pl)
+            except Exception:
+                # Handle cases where a playlist might be inaccessible
+                pass 
+                
+        playlists.extend(full_playlist_items)
         offset += limit
     
     print(f"Found {len(playlists)} playlists.")
@@ -281,8 +295,8 @@ HTML_APP_PAGE = """
             justify-content: space-between; 
             align-items: center; 
             border-bottom: 1px solid #282828; 
-            padding-bottom: 2rem; /* Increased padding */
-            margin-bottom: 2rem;  /* Added margin */
+            padding-bottom: 2rem; 
+            margin-bottom: 2rem;
         }
         .header h1 { margin: 0; }
         .header span { font-size: 0.9rem; }
@@ -291,44 +305,63 @@ HTML_APP_PAGE = """
         
         .content { 
             display: grid; 
-            grid-template-columns: 1fr; /* Default to single column */
+            grid-template-columns: 1fr; /* Single column on mobile */
             gap: 2rem; 
-            max-width: 1200px; /* Increased max width */
+            max-width: 1400px; /* Wider max width */
             margin-left: auto; 
             margin-right: auto;
+            align-items: center; /* Vertically center the cards */
         }
         /* Asymmetrical layout on larger screens */
-        @media (min-width: 768px) { 
-            .content { grid-template-columns: 1fr 2fr; } /* 1:2 ratio */
+        @media (min-width: 900px) { 
+            .content { grid-template-columns: 1fr 3fr; } /* 1:3 ratio */
         }
         
         .box { background: #181818; padding: 1.5rem; border-radius: 1rem; }
-        h2 { margin-top: 0; border-bottom: 1px solid #282828; padding-bottom: 0.5rem; }
+        .box h2 { 
+            margin-top: 0; 
+            border-bottom: 1px solid #282828; 
+            padding-bottom: 0.5rem; 
+        }
         
+        /* Left Card ("Target") Specific Styles */
+        .target-card { padding: 2rem; } /* More padding */
+        .target-card h2 { font-size: 1.8rem; } /* Bigger text */
+        .target-card p { font-size: 1.1rem; }
+        .target-card .form-group label { font-size: 1rem; }
+
         .form-group { margin-bottom: 1.5rem; }
         .form-group label { display: block; margin-bottom: 0.5rem; font-weight: bold; }
-        .form-group input[type='text'] { width: 100%; padding: 0.8rem; background: #282828; border: 1px solid #555; border-radius: 0.5rem; color: #fff; box-sizing: border-box; }
+        .form-group input[type='text'] { width: 100%; padding: 1rem; background: #282828; border: 1px solid #555; border-radius: 0.5rem; color: #fff; box-sizing: border-box; font-size: 1rem; }
         
+        /* Right Card ("Filter") Specific Styles */
+        .filter-card { padding: 2rem; }
+        .filter-card h2 { font-size: 1.8rem; }
+        .filter-card p { font-size: 1.1rem; }
+
         .playlist-list { 
-            max-height: 600px; /* Increased height */
+            max-height: 700px; /* Taller list */
             overflow-y: auto; 
             background: #282828; 
             border-radius: 0.5rem; 
             padding: 1rem; 
             border: 1px solid #555;
-            display: flex;
-            flex-direction: column;
-            gap: 0.5rem; /* Space between items */
+            /* This creates the multi-column grid */
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+            gap: 0.75rem; /* Space between items */
         }
         
         /* New Playlist Item Styling */
         .playlist-item {
             display: flex;
             align-items: center;
-            padding: 0.5rem;
+            padding: 0.75rem; /* More padding */
             border-radius: 8px;
             transition: background-color 0.2s;
             cursor: pointer;
+            background-color: #181818; /* Darker item background */
+            overflow: hidden; /* Ensure no overflow */
         }
         .playlist-item:hover {
             background-color: #3a3a3a;
@@ -336,9 +369,9 @@ HTML_APP_PAGE = """
         
         .playlist-item input[type='checkbox'] {
             accent-color: #1DB954; /* Style the checkbox */
-            width: 1.2rem;
-            height: 1.2rem;
-            flex-shrink: 0; /* Prevent checkbox from shrinking */
+            width: 1.3rem; /* Larger checkbox */
+            height: 1.3rem;
+            flex-shrink: 0; 
         }
         
         .playlist-cover {
@@ -346,12 +379,12 @@ HTML_APP_PAGE = """
             height: 50px;
             object-fit: cover;
             border-radius: 4px; /* Spotify-like rounded square */
-            margin-left: 0.75rem;
-            margin-right: 0.75rem;
+            margin-left: 1rem;
+            margin-right: 1rem;
             flex-shrink: 0;
+            background: #333; /* Placeholder background */
         }
         .playlist-cover.placeholder {
-            background: #333;
             display: grid;
             place-items: center;
             font-size: 1.5rem;
@@ -363,6 +396,7 @@ HTML_APP_PAGE = """
             overflow: hidden; /* Prevent long names from breaking layout */
         }
         .playlist-name {
+            font-size: 1rem; /* Larger name */
             font-weight: bold;
             color: #fff;
             white-space: nowrap;
@@ -370,13 +404,33 @@ HTML_APP_PAGE = """
             text-overflow: ellipsis;
         }
         .playlist-count {
-            font-size: 0.85rem;
+            font-size: 0.9rem;
             color: #aaa;
         }
         
-        .submit-btn { width: 100%; background-color: #1DB954; color: white; padding: 1rem 2rem; border: none; border-radius: 500px; text-decoration: none; font-size: 1.2rem; font-weight: bold; cursor: pointer; margin-top: 1rem; }
+        .submit-btn { 
+            width: 100%; 
+            background-color: #1DB954; 
+            color: white; 
+            padding: 1.25rem 2rem; /* Taller button */
+            border: none; 
+            border-radius: 500px; 
+            text-decoration: none; 
+            font-size: 1.4rem; /* Bigger button text */
+            font-weight: bold; 
+            cursor: pointer; 
+            margin-top: 1rem; 
+        }
         .submit-btn:hover { background-color: #1ED760; }
-        #response-box { margin-top: 1rem; background: #282828; padding: 1rem; border-radius: 0.5rem; display: none; }
+        
+        #response-box { 
+            margin-top: 1.5rem; 
+            background: #282828; 
+            padding: 1.5rem; 
+            border-radius: 0.5rem; 
+            display: none; 
+            font-size: 1.1rem;
+        }
     </style>
 </head>
 <body>
@@ -388,7 +442,7 @@ HTML_APP_PAGE = """
     <!-- Form now wraps both columns -->
     <form id="filter-form">
     <div class="content">
-        <div class="box">
+        <div class="box target-card">
             <h2>1. Target Playlist</h2>
             <p>Paste the link of the playlist you want to clean up.</p>
             <div class="form-group">
@@ -401,7 +455,7 @@ HTML_APP_PAGE = """
             <button type="submit" class="submit-btn">Start Filtering</button>
         </div>
 
-        <div class="box">
+        <div class="box filter-card">
             <h2>2. Filter Playlists</h2>
             <p>Select which songs to remove. Any song from these sources will be removed from your target playlist.</p>
             <div class="playlist-list" id="filter-playlists-container">
@@ -409,8 +463,11 @@ HTML_APP_PAGE = """
                 <!-- Styled Liked Songs Item -->
                 <label class="playlist-item">
                     <input type="checkbox" name="include_liked_songs" checked>
-                    <div class="playlist-cover placeholder" style="background: linear-gradient(135deg, #4e00f5, #a300da);">
-                        <span style="font-size: 1.5rem;">❤️</span>
+                    <div class="playlist-cover placeholder">
+                        <!-- Inline SVG for a white heart -->
+                        <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="white">
+                            <path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/>
+                        </svg>
                     </div>
                     <div class="playlist-info">
                         <span class="playlist-name">Your Liked Songs</span>
@@ -442,7 +499,7 @@ HTML_APP_PAGE = """
     </div>
     </form> <!-- Form tag closes here -->
     
-    <div style="max-width: 1200px; margin-left: auto; margin-right: auto;">
+    <div style="max-width: 1400px; margin-left: auto; margin-right: auto;">
         <div id="response-box"></div>
     </div>
 
@@ -453,6 +510,7 @@ HTML_APP_PAGE = """
             const form = e.target;
             const formData = new FormData(form);
             const submitBtn = form.querySelector('.submit-btn');
+_button = document.querySelector('.submit-btn');
             const responseBox = document.getElementById('response-box');
             
             submitBtn.disabled = true;
@@ -478,7 +536,7 @@ HTML_APP_PAGE = """
                 }
                 
             } catch (error) {
-                responseBox.style.color = '#FF4s00'; // Red for error
+                responseBox.style.color = '#FF4500'; // Red for error
                 responseBox.textContent = 'A network error occurred: ' + error.message;
             } finally {
                 submitBtn.disabled = false;
