@@ -303,9 +303,10 @@ HTML_APP_PAGE = """
         <span>Logged in as: <b>{{ user_name }}</b> <a href="{{ url_for('logout') }}" class="logout-btn">Logout</a></span>
     </div>
 
+    <form id="filter-form"> <!-- MOVED FORM TAG HERE TO WRAP EVERYTHING -->
     <div class="content">
         <div class="box">
-            <form id="filter-form">
+            <!-- REMOVED <form> TAG FROM HERE -->
                 <h2>1. Target Playlist</h2>
                 <p>Paste the link of the playlist you want to clean up.</p>
                 <div class="form-group">
@@ -316,7 +317,7 @@ HTML_APP_PAGE = """
                 <h2>3. Run Filter</h2>
                 <p>This will permanently remove songs from your target playlist.</p>
                 <button type="submit" class="submit-btn">Start Filtering</button>
-            </form>
+            <!-- REMOVED </form> TAG FROM HERE -->
         </div>
 
         <div class="box">
@@ -339,6 +340,7 @@ HTML_APP_PAGE = """
             </div>
         </div>
     </div>
+    </form> <!-- MOVED </form> TAG HERE -->
     
     <div style="max-width: 1000px; margin-left: auto; margin-right: auto;">
         <div id="response-box"></div>
@@ -353,11 +355,7 @@ HTML_APP_PAGE = """
             const submitBtn = form.querySelector('.submit-btn');
             const responseBox = document.getElementById('response-box');
             
-            // Get all checked playlists
-            const filterPlaylists = [];
-            document.querySelectorAll('input[name="filter_playlists"]:checked').forEach(input => {
-                formData.append('filter_playlists', input.value);
-            });
+            <!-- DELETED THE REDUNDANT JAVASCRIPT LOOP -->
             
             submitBtn.disabled = true;
             submitBtn.textContent = 'Filtering...';
