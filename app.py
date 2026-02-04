@@ -193,7 +193,6 @@ def run_filter():
             target_id_counts[tid] = target_id_counts.get(tid, 0) + 1
 
         # 4. Separate unavailable tracks
-        # Note: Local files and unavailable tracks often can't be removed via API
         unavailable_tracks = []
         available_target_tracks = []
         seen_unavailable_ids = set()
@@ -202,8 +201,7 @@ def run_filter():
             is_local = track.get('is_local', False)
             is_playable = track.get('is_playable', True)
             
-            # Local files have weird IDs that can't be removed via API
-            if is_local:
+            if is_local or not is_playable:
                 if track['id'] not in seen_unavailable_ids:
                     unavailable_tracks.append(track)
                     seen_unavailable_ids.add(track['id'])
@@ -279,18 +277,16 @@ def run_filter():
         internal_duplicates = find_internal_duplicates(remaining_after_fuzzy)
 
         # 10. Compile all tracks to remove (unique IDs only)
-        # DON'T include unavailable/local tracks - they can't be removed via API
         tracks_to_remove_ids = set()
         removal_details = []
-        skipped_local_count = 0
         
-        # Skip unavailable tracks from removal - just report them
+        # Add unavailable tracks
         for track in unavailable_tracks:
-            skipped_local_count += 1
+            tracks_to_remove_ids.add(track['id'])
             removal_details.append({
                 'name': track.get('name', 'Unknown'),
                 'artists': ', '.join(a.get('name', '') for a in track.get('artists', [])),
-                'reason': '🚫 Local file (cannot be removed via API - remove manually)',
+                'reason': '🚫 Unavailable/Local file',
                 'score': 0,
                 'category': 'unavailable'
             })
@@ -338,8 +334,10 @@ def run_filter():
             
             for i in range(0, len(tracks_list), 100):
                 batch = tracks_list[i:i+100]
+                # Convert IDs to full Spotify URIs
+                batch_uris = [f"spotify:track:{tid}" for tid in batch]
                 try:
-                    sp.playlist_remove_all_occurrences_of_items(target_playlist_id, batch)
+                    sp.playlist_remove_all_occurrences_of_items(target_playlist_id, batch_uris)
                     for tid in batch:
                         actual_removals += target_id_counts.get(tid, 1)
                 except Exception as e:
@@ -369,7 +367,7 @@ def run_filter():
         results = {
             'actual_removals': actual_removals,
             'unique_tracks': len(tracks_to_remove_ids),
-            'local_files_count': len(unavailable_tracks),
+            'unavailable_count': len(unavailable_tracks),
             'exact_count': len(exact_matches),
             'fuzzy_count': len(fuzzy_duplicates),
             'internal_count': len(internal_duplicates),
@@ -1148,7 +1146,7 @@ HTML_RESULTS_PAGE = """
             <div class="summary-subtitle">({{ results.unique_tracks }} unique tracks, {{ results.actual_removals - results.unique_tracks }} were duplicates in playlist)</div>
             {% endif %}
             <div class="stats">
-                {% if results.local_files_count > 0 %}<div class="stat">🚫 {{ results.local_files_count }} local files (manual removal needed)</div>{% endif %}
+                {% if results.unavailable_count > 0 %}<div class="stat">🚫 {{ results.unavailable_count }} unavailable</div>{% endif %}
                 {% if results.exact_count > 0 %}<div class="stat">✓ {{ results.exact_count }} exact matches</div>{% endif %}
                 {% if results.fuzzy_count > 0 %}<div class="stat">🔄 {{ results.fuzzy_count }} fuzzy duplicates</div>{% endif %}
                 {% if results.internal_count > 0 %}<div class="stat">📋 {{ results.internal_count }} internal duplicates</div>{% endif %}
