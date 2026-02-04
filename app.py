@@ -5,7 +5,7 @@ from flask import Flask, redirect, request, session, url_for, render_template_st
 from dotenv import load_dotenv
 
 # --- FLASK APP AND SESSION SETUP ---
-app = Flask(__name__)
+app = Flask(__name__, static_folder='.', static_url_path='/static')
 # Load .env file for local development (Vercel will use its own env vars)
 load_dotenv()
 
@@ -20,16 +20,8 @@ CLIENT_SECRET = os.environ.get("CLIENT_SECRET")
 REDIRECT_URI = os.environ.get("REDIRECT_URI") # Should be https://.../callback
 SCOPE = "user-library-read playlist-read-private playlist-read-collaborative playlist-modify-private playlist-modify-public"
 
-# --- LOGO SVG (for use in templates) ---
-# A custom-made "Spotify Filter" logo
-SVG_LOGO = """
-<svg width="40" height="40" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
-    <path d="M85.006 15.011C75.874 5.879 63.63 0 50 0C22.386 0 0 22.386 0 50C0 77.614 22.386 100 50 100C77.614 100 100 77.614 100 50C100 36.37 94.121 24.126 85.006 15.011ZM74.062 70.312C73.12 71.304 71.696 71.597 70.704 70.655C58.344 63.098 42.66 61.266 25.12 65.4C23.999 65.684 22.844 65.045 22.56 63.924C22.276 62.803 22.915 61.648 24.036 61.364C42.84 57.008 59.73 58.97 73.193 67.24C74.185 68.17 74.478 69.593 73.536 70.585L74.062 70.312Z" fill="#1DB954"/>
-    <path d="M98 60H76C75.4477 60 75 60.4477 75 61V65C75 65.5523 75.4477 66 76 66H98C98.5523 66 99 65.5523 99 65V61C99 60.4477 98.5523 60 98 60Z" fill="white"/>
-    <path d="M94 72H80C79.4477 72 79 72.4477 79 73V77C79 77.5523 79.4477 78 80 78H94C94.5523 78 95 77.5523 95 77V73C95 72.4477 94.5523 72 94 72Z" fill="white"/>
-    <path d="M90 84H84C83.4477 84 83 84.4477 83 85V89C83 89.5523 83.4477 90 84 90H90C90.5523 90 91 89.5523 91 89V85C91 84.4477 90.5523 84 90 84Z" fill="white"/>
-</svg>
-"""
+# --- LOGO IMAGE (for use in templates) ---
+LOGO_IMG = '<img src="/static/spotify.png" alt="Spotify Filterer" width="40" height="40">'
 
 
 def get_oauth_manager():
@@ -69,7 +61,7 @@ def index():
     
     if not sp:
         # User is not logged in
-        return render_template_string(HTML_LOGIN_PAGE, logo=SVG_LOGO)
+        return render_template_string(HTML_LOGIN_PAGE, logo=LOGO_IMG)
 
     # User is logged in, show the main app
     user_info = sp.current_user()
@@ -102,7 +94,7 @@ def index():
         HTML_APP_PAGE, 
         user_name=user_info['display_name'],
         playlists=playlists,
-        logo=SVG_LOGO
+        logo=LOGO_IMG
     )
 
 @app.route("/login")
@@ -276,23 +268,28 @@ HTML_LOGIN_PAGE = """
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Spotify Filterer</title>
     <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
         body { 
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; 
-            display: flex; /* Changed to flex */
-            flex-direction: column; /* Stack header and container */
-            align-items: center; /* Center horizontally */
-            justify-content: center; /* Center vertically */
             min-height: 100vh; 
             background-color: #121212; 
             color: #fff;
-            margin: 0;
-            padding: 2rem;
-            box-sizing: border-box;
             
-            /* The new animated background */
+            /* The animated background */
             background: linear-gradient(-45deg, #121212, #191919, #0d2a14, #191919);
             background-size: 400% 400%;
             animation: gradientBG 25s ease infinite;
+            
+            /* Center everything */
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
         }
         
         @keyframes gradientBG {
@@ -301,53 +298,77 @@ HTML_LOGIN_PAGE = """
             100% { background-position: 0% 50%; }
         }
 
+        .login-wrapper {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            text-align: center;
+            padding: 2rem;
+        }
+
         .header {
             display: flex;
             align-items: center;
+            justify-content: center;
             gap: 1rem;
-            margin-bottom: 2rem;
+            margin-bottom: 2.5rem;
+        }
+        .header img {
+            width: 48px;
+            height: 48px;
         }
         .header h1 {
             font-size: 2.5rem;
+            font-weight: 700;
         }
 
         .container { 
-            text-align: center; 
             background: #282828; 
-            padding: 3rem 4rem; 
+            padding: 3rem; 
             border-radius: 1rem; 
             width: 100%;
-            max-width: 450px;
+            max-width: 400px;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
         }
         .container p {
-            font-size: 1.2rem;
-            color: #aaa;
-            margin-bottom: 2.5rem; /* Added spacing */
+            font-size: 1.1rem;
+            color: #b3b3b3;
+            margin-bottom: 2rem;
         }
         .login-btn { 
             background-color: #1DB954; 
             color: white; 
-            padding: 1.25rem 2rem; /* Taller button */
+            padding: 1rem 2rem;
             border: none; 
             border-radius: 500px; 
             text-decoration: none; 
-            font-size: 1.2rem; 
-            font-weight: bold; 
+            font-size: 1.1rem; 
+            font-weight: 700; 
             cursor: pointer; 
-            display: block; /* Make it full-width */
+            display: block;
             width: 100%;
+            transition: background-color 0.2s, transform 0.1s;
         }
-        .login-btn:hover { background-color: #1ED760; }
+        .login-btn:hover { 
+            background-color: #1ED760; 
+            transform: scale(1.02);
+        }
+        .login-btn:active {
+            transform: scale(0.98);
+        }
     </style>
 </head>
 <body>
-    <div class="header">
-        {{ logo|safe }}
-        <h1>Spotify Filterer</h1>
-    </div>
-    <div class="container">
-        <p>Log in to get started.</p>
-        <a href="{{ url_for('login') }}" class="login-btn">Login with Spotify</a>
+    <div class="login-wrapper">
+        <div class="header">
+            {{ logo|safe }}
+            <h1>Spotify Filterer</h1>
+        </div>
+        <div class="container">
+            <p>Log in to get started.</p>
+            <a href="{{ url_for('login') }}" class="login-btn">Login with Spotify</a>
+        </div>
     </div>
 </body>
 </html>
