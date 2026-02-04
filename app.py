@@ -517,7 +517,8 @@ def normalize_title(title):
     title = title.lower()
     # Remove common suffixes that indicate versions - ORDER MATTERS (specific before generic)
     patterns = [
-        # Specific remaster patterns first
+        # Specific remaster/re-recorded patterns first
+        r'\s*[-–—]\s*re-?recorded.*$',  # " - Re-Recorded" at end
         r'\s*\(remastered\s+album\s+version\)',
         r'\s*\(remastered\s+\d+\)',
         r'\s*\(remaster(ed)?\s*\d*\)',
