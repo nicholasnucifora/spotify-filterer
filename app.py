@@ -331,6 +331,20 @@ def run_filter():
         failed_removals = []
         removal_log = []  # Debug log
         
+        # Debug: Find 7 rings specifically
+        seven_rings_debug = []
+        for tid in tracks_to_remove_ids:
+            for d in removal_details:
+                if '7 rings' in d.get('name', '').lower() and tid[:8] in d.get('reason', ''):
+                    seven_rings_debug.append(f"7 rings ID {tid} IS in tracks_to_remove_ids")
+                    break
+        
+        # Check if 7 rings is in the target playlist
+        for track in target_tracks:
+            if '7 rings' in track.get('name', '').lower():
+                in_removal = track['id'] in tracks_to_remove_ids
+                seven_rings_debug.append(f"Target has '7 rings' ID={track['id']}, in_removal_set={in_removal}")
+        
         if tracks_to_remove_ids:
             tracks_list = list(tracks_to_remove_ids)
             
@@ -354,13 +368,16 @@ def run_filter():
         post_removal_ids = set()
         offset = 0
         while True:
-            results = sp.playlist_items(target_playlist_id, limit=100, offset=offset, fields="items(track(id)),next")
+            results = sp.playlist_items(target_playlist_id, limit=100, offset=offset, fields="items(track(id,name)),next")
             if not results['items']:
                 break
             for item in results['items']:
                 track = item.get('track')
                 if track and track.get('id'):
                     post_removal_ids.add(track['id'])
+                    # Check for 7 rings after removal
+                    if '7 rings' in track.get('name', '').lower():
+                        seven_rings_debug.append(f"AFTER REMOVAL: '7 rings' still exists with ID={track['id']}")
             offset += 100
         
         for tid in sample_tracks:
@@ -405,7 +422,8 @@ def run_filter():
             'warnings_total': len(cross_warnings_sorted),
             'debug_log': removal_log,
             'verification': verification_results,
-            'post_removal_count': len(post_removal_ids)
+            'post_removal_count': len(post_removal_ids),
+            'seven_rings_debug': seven_rings_debug
         }
 
         return render_template_string(HTML_RESULTS_PAGE,
@@ -1210,6 +1228,17 @@ HTML_RESULTS_PAGE = """
         <div class="results-box" style="border-left: 3px solid #888;">
             <h3 style="color: #888;">🔍 Debug Info</h3>
             <p>Playlist after removal: {{ results.post_removal_count }} tracks</p>
+            
+            <h4>7 Rings Investigation:</h4>
+            <ul class="song-list" style="font-family: monospace; font-size: 0.8rem; border-left: 3px solid #FF4500;">
+                {% for log in results.seven_rings_debug %}
+                <li>{{ log }}</li>
+                {% endfor %}
+                {% if not results.seven_rings_debug %}
+                <li>No 7 rings debug info captured</li>
+                {% endif %}
+            </ul>
+            
             <h4>Verification (sample of 5 tracks):</h4>
             <ul class="song-list">
                 {% for v in results.verification %}
