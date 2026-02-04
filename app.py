@@ -246,32 +246,32 @@ def run_filter():
                         all_filter_song_ids.add(track['id'])
                 offset += 100
 
-        # 6. Find exact ID matches - deduplicate by track ID
+        # 6. Find exact ID matches - but keep ALL tracks for fuzzy matching
         exact_matches = []
-        remaining_tracks = []
-        seen_exact_ids = set()
+        exact_match_ids = set()
         
         for track in available_target_tracks:
             if track['id'] in all_filter_song_ids:
-                if track['id'] not in seen_exact_ids:
+                if track['id'] not in exact_match_ids:
                     exact_matches.append({'track': track, 'reason': 'Exact match in filter playlist'})
-                    seen_exact_ids.add(track['id'])
-            else:
-                remaining_tracks.append(track)
+                    exact_match_ids.add(track['id'])
 
-        # 7. Deduplicate remaining_tracks for fuzzy matching
-        remaining_unique = []
-        seen_remaining_ids = set()
-        for track in remaining_tracks:
-            if track['id'] not in seen_remaining_ids:
-                remaining_unique.append(track)
-                seen_remaining_ids.add(track['id'])
+        # 7. Get unique tracks from target for fuzzy matching (ALL of them, not just non-exact)
+        target_unique = []
+        seen_target_ids = set()
+        for track in available_target_tracks:
+            if track['id'] not in seen_target_ids:
+                target_unique.append(track)
+                seen_target_ids.add(track['id'])
 
         # 8. Find fuzzy duplicates between target and filter playlists
-        fuzzy_duplicates, cross_warnings = find_duplicates_and_warnings(remaining_unique, all_filter_tracks)
+        # This will catch different versions of the same song (different IDs but same title/artist)
+        # Exclude tracks that already had exact matches
+        tracks_for_fuzzy = [t for t in target_unique if t['id'] not in exact_match_ids]
+        fuzzy_duplicates, cross_warnings = find_duplicates_and_warnings(tracks_for_fuzzy, all_filter_tracks)
         
         fuzzy_dup_ids = {d[0]['id'] for d in fuzzy_duplicates}
-        remaining_after_fuzzy = [t for t in remaining_unique if t['id'] not in fuzzy_dup_ids]
+        remaining_after_fuzzy = [t for t in tracks_for_fuzzy if t['id'] not in fuzzy_dup_ids]
 
         # 9. Find internal duplicates within the target playlist
         internal_duplicates = find_internal_duplicates(remaining_after_fuzzy)
@@ -333,17 +333,25 @@ def run_filter():
         
         # Debug: Find 7 rings specifically
         seven_rings_debug = []
-        for tid in tracks_to_remove_ids:
-            for d in removal_details:
-                if '7 rings' in d.get('name', '').lower() and tid[:8] in d.get('reason', ''):
-                    seven_rings_debug.append(f"7 rings ID {tid} IS in tracks_to_remove_ids")
-                    break
         
-        # Check if 7 rings is in the target playlist
+        # Check what 7 rings versions exist in target
         for track in target_tracks:
             if '7 rings' in track.get('name', '').lower():
-                in_removal = track['id'] in tracks_to_remove_ids
-                seven_rings_debug.append(f"Target has '7 rings' ID={track['id']}, in_removal_set={in_removal}")
+                tid = track['id']
+                in_exact = tid in exact_match_ids
+                in_fuzzy = tid in fuzzy_dup_ids
+                in_removal = tid in tracks_to_remove_ids
+                seven_rings_debug.append(f"Target: '{track['name']}' ID={tid}, exact={in_exact}, fuzzy={in_fuzzy}, will_remove={in_removal}")
+        
+        # Check what 7 rings versions exist in filter
+        for track in all_filter_tracks:
+            if '7 rings' in track.get('name', '').lower():
+                seven_rings_debug.append(f"Filter: '{track['name']}' ID={track['id']}, duration={track.get('duration_ms')}ms")
+        
+        # Check if the non-exact 7 rings was in fuzzy matching input
+        for track in tracks_for_fuzzy:
+            if '7 rings' in track.get('name', '').lower():
+                seven_rings_debug.append(f"Fuzzy input: '{track['name']}' ID={track['id']}, duration={track.get('duration_ms')}ms")
         
         if tracks_to_remove_ids:
             tracks_list = list(tracks_to_remove_ids)
