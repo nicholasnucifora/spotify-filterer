@@ -329,20 +329,48 @@ def run_filter():
         # 11. Remove the songs in batches
         actual_removals = 0
         failed_removals = []
+        removal_log = []  # Debug log
+        
         if tracks_to_remove_ids:
             tracks_list = list(tracks_to_remove_ids)
             
             for i in range(0, len(tracks_list), 100):
                 batch = tracks_list[i:i+100]
-                # Convert IDs to full Spotify URIs
                 batch_uris = [f"spotify:track:{tid}" for tid in batch]
                 try:
-                    sp.playlist_remove_all_occurrences_of_items(target_playlist_id, batch_uris)
+                    result = sp.playlist_remove_all_occurrences_of_items(target_playlist_id, batch_uris)
+                    removal_log.append(f"Batch {i//100 + 1}: Sent {len(batch)} tracks, API response: {result}")
                     for tid in batch:
                         actual_removals += target_id_counts.get(tid, 1)
                 except Exception as e:
-                    print(f"Error removing batch: {e}")
+                    removal_log.append(f"Batch {i//100 + 1}: FAILED - {str(e)}")
                     failed_removals.extend(batch)
+        
+        # After removal, verify a sample of tracks are actually gone
+        verification_results = []
+        sample_tracks = list(tracks_to_remove_ids)[:5]  # Check first 5
+        
+        # Re-fetch the playlist to verify
+        post_removal_ids = set()
+        offset = 0
+        while True:
+            results = sp.playlist_items(target_playlist_id, limit=100, offset=offset, fields="items(track(id)),next")
+            if not results['items']:
+                break
+            for item in results['items']:
+                track = item.get('track')
+                if track and track.get('id'):
+                    post_removal_ids.add(track['id'])
+            offset += 100
+        
+        for tid in sample_tracks:
+            still_exists = tid in post_removal_ids
+            track_name = next((d['name'] for d in removal_details if tid in d.get('reason', '')), 'Unknown')
+            verification_results.append({
+                'id': tid[:12],
+                'still_in_playlist': still_exists,
+                'name': track_name
+            })
 
         # Sort removal details and warnings
         category_order = {'exact': 0, 'fuzzy': 1, 'internal': 2, 'unavailable': 3}
@@ -374,7 +402,10 @@ def run_filter():
             'failed_count': len(failed_removals),
             'removal_details': removal_details_sorted,
             'warnings': warnings_for_template,
-            'warnings_total': len(cross_warnings_sorted)
+            'warnings_total': len(cross_warnings_sorted),
+            'debug_log': removal_log,
+            'verification': verification_results,
+            'post_removal_count': len(post_removal_ids)
         }
 
         return render_template_string(HTML_RESULTS_PAGE,
@@ -1175,6 +1206,25 @@ HTML_RESULTS_PAGE = """
             </ul>
         </div>
         {% endif %}
+        
+        <div class="results-box" style="border-left: 3px solid #888;">
+            <h3 style="color: #888;">🔍 Debug Info</h3>
+            <p>Playlist after removal: {{ results.post_removal_count }} tracks</p>
+            <h4>Verification (sample of 5 tracks):</h4>
+            <ul class="song-list">
+                {% for v in results.verification %}
+                <li style="color: {% if v.still_in_playlist %}#FF4500{% else %}#1DB954{% endif %};">
+                    ID: {{ v.id }}... - {% if v.still_in_playlist %}❌ STILL IN PLAYLIST{% else %}✅ Removed{% endif %}
+                </li>
+                {% endfor %}
+            </ul>
+            <h4>API Log:</h4>
+            <ul class="song-list" style="font-family: monospace; font-size: 0.8rem;">
+                {% for log in results.debug_log %}
+                <li>{{ log }}</li>
+                {% endfor %}
+            </ul>
+        </div>
         {% endif %}
     </div>
 </body>
