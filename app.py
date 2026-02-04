@@ -435,7 +435,7 @@ def run_filter():
         
         # Prepare warnings for template
         warnings_for_template = []
-        for target_track, similar_track, score, reasons in cross_warnings_sorted[:30]:
+        for target_track, similar_track, score, reasons in cross_warnings_sorted:
             warnings_for_template.append({
                 'name': target_track.get('name', 'Unknown'),
                 'artists': ', '.join(a.get('name', '') for a in target_track.get('artists', [])),
@@ -513,12 +513,19 @@ def normalize_title(title):
     """Normalize a track title for comparison by removing version indicators."""
     if not title:
         return ""
+    original = title
     title = title.lower()
-    # Remove common suffixes that indicate versions
+    # Remove common suffixes that indicate versions - ORDER MATTERS (specific before generic)
     patterns = [
-        r'\s*[-–—]\s*remaster(ed)?\s*\d*',
-        r'\s*[-–—]\s*\d+\s*remaster',
+        # Specific remaster patterns first
+        r'\s*\(remastered\s+album\s+version\)',
+        r'\s*\(remastered\s+\d+\)',
         r'\s*\(remaster(ed)?\s*\d*\)',
+        r'\s*[-–—]\s*remaster(ed)?(\s+\d+)?(\s+album\s+version)?',
+        r'\s*[-–—]\s*\d+\s*remaster(ed)?',
+        r'\s*\(remaster(ed)?(\s+\d+)?(\s+album\s+version)?\)',
+        r'\s*\(\d+\s*remaster(ed)?\)',
+        # Album/version indicators
         r'\s*\(deluxe.*?\)',
         r'\s*\(expanded.*?\)',
         r'\s*\(anniversary.*?\)',
@@ -529,9 +536,14 @@ def normalize_title(title):
         r'\s*\(radio edit.*?\)',
         r'\s*\(explicit.*?\)',
         r'\s*\(clean.*?\)',
+        r'\s*\(edit\)',
+        r'\s*\(re-?recorded.*?\)',
+        r'\s*\(remix.*?\)',
+        r'\s*[-–—]\s*remix.*$',
         r'\s*[-–—]\s*live.*$',
         r'\s*\(live.*?\)',
         r'\s*\(acoustic.*?\)',
+        r'\s*[-–—]\s*acoustic.*$',
         r'\s*[-–—]\s*from\s+".*"',
         r'\s*\(from\s+".*"\)',
         r'\s*\(from\s+.*?\)',
@@ -539,6 +551,14 @@ def normalize_title(title):
         r'\s*\(mono.*?\)',
         r'\s*[-–—]\s*stereo.*$',
         r'\s*\(stereo.*?\)',
+        r'\s*\(super\s+deluxe.*?\)',
+        r'\s*\(special\s+edition.*?\)',
+        r'\s*\(version\)$',
+        # Generic catch-alls LAST
+        r'\s*\([^)]*remaster[^)]*\)',  # Anything with remaster in parens
+        r'\s*\([^)]*version\)',  # Anything ending with version in parens
+        r'\s*\([^)]*edition\)',  # Anything ending with edition in parens
+        r'\s*\([^)]*mix\)',  # Anything ending with mix in parens
     ]
     for pattern in patterns:
         title = re.sub(pattern, '', title, flags=re.IGNORECASE)
@@ -1209,6 +1229,7 @@ HTML_RESULTS_PAGE = """
         .song-reason { color: #888; font-size: 0.85rem; margin-top: 0.25rem; }
         .warning-box { border-left: 3px solid #FFA500; }
         .warning-box h3 { color: #FFA500; }
+        .warning-box .song-list { max-height: none; }
         .error-box { background: #181818; padding: 2rem; border-radius: 1rem; border-left: 3px solid #FF4500; }
         .error-box h3 { color: #FF4500; margin-top: 0; }
     </style>
@@ -1256,7 +1277,6 @@ HTML_RESULTS_PAGE = """
                 {% for warning in results.warnings %}
                 <li><span class="song-name">{{ warning.name }}</span><span class="song-artists"> - {{ warning.artists }}</span><div class="song-reason" style="color: #FFA500;">Similar to "{{ warning.similar_to }}" ({{ warning.score }}pts: {{ warning.reasons }})</div></li>
                 {% endfor %}
-                {% if results.warnings_total > 30 %}<li style="color: #aaa;">...and {{ results.warnings_total - 30 }} more warnings</li>{% endif %}
             </ul>
         </div>
         {% endif %}
