@@ -413,7 +413,9 @@ def get_playlist_id_from_link(link):
         return None
 
 
-# --- DUPLICATE DETECTION HELPERS ---def normalize_title(title):
+# --- DUPLICATE DETECTION HELPERS ---
+
+def normalize_title(title):
     """Normalize a track title for comparison by removing version indicators."""
     if not title:
         return ""
