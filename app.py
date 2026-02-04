@@ -594,7 +594,7 @@ def get_isrc(track):
 def calculate_similarity_score(track1, track2):
     """
     Calculate similarity score between two tracks.
-    Returns (score, reasons) where score >= 70 means duplicate, 40-69 means warning.
+    Returns (score, reasons) where score >= 80 means duplicate, 40-79 means warning.
     """
     score = 0
     reasons = []
@@ -716,7 +716,7 @@ def find_duplicates_and_warnings(target_tracks, filter_tracks):
                     best_reasons = reasons
         
         if best_match:
-            if best_score >= 70:
+            if best_score >= 80:
                 duplicates.append((target_track, best_match, best_score, best_reasons))
                 seen_target_ids.add(target_track['id'])
             elif best_score >= 40:
@@ -776,7 +776,7 @@ def find_internal_duplicates(tracks):
                     continue
                     
                 score, reasons = calculate_similarity_score(track1, track2)
-                if score >= 70:
+                if score >= 80:
                     # Keep track1, remove track2
                     duplicates.append((track2, track1, score, reasons))
                     dominated_ids.add(track2['id'])
