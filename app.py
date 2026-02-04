@@ -191,16 +191,40 @@ def run_filter():
             tid = track['id']
             target_id_counts[tid] = target_id_counts.get(tid, 0) + 1
 
-        # 4. Separate unavailable tracks
+        # 4. Check track availability (need market parameter for this)
+        # Get user's market
+        user_info = sp.current_user()
+        user_market = user_info.get('country', 'US')
+        
+        # Build a set of unavailable track IDs by checking with market parameter
+        unavailable_ids = set()
+        offset = 0
+        while True:
+            results = sp.playlist_items(
+                target_playlist_id, 
+                limit=100, 
+                offset=offset,
+                fields="items(track(id,is_playable,is_local)),next",
+                market=user_market
+            )
+            if not results['items']:
+                break
+            for item in results['items']:
+                track = item.get('track')
+                if track and track.get('id'):
+                    is_local = track.get('is_local', False)
+                    is_playable = track.get('is_playable', True)
+                    if is_local or not is_playable:
+                        unavailable_ids.add(track['id'])
+            offset += 100
+        
+        # Separate tracks based on availability
         unavailable_tracks = []
         available_target_tracks = []
         seen_unavailable_ids = set()
         
         for track in target_tracks:
-            is_local = track.get('is_local', False)
-            is_playable = track.get('is_playable', True)
-            
-            if is_local or not is_playable:
+            if track['id'] in unavailable_ids:
                 if track['id'] not in seen_unavailable_ids:
                     unavailable_tracks.append(track)
                     seen_unavailable_ids.add(track['id'])
