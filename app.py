@@ -1,4 +1,6 @@
 import os
+import re
+from difflib import SequenceMatcher
 import spotipy
 from spotipy.oauth2 import SpotifyOAuth
 from flask import Flask, redirect, request, session, url_for, render_template_string
@@ -155,9 +157,50 @@ def run_filter():
             return "Invalid Target Playlist link.", 400
         
         playlist_name = sp.playlist(target_playlist_id, fields='name')['name']
+        
+        # Get user's market for availability checking
+        user_info = sp.current_user()
+        user_market = user_info.get('country', 'US')
 
-        # 3. Build the master set of all songs to remove
+        # 3. Fetch target playlist tracks with full details
+        print(f"Fetching target playlist: '{playlist_name}'...")
+        target_tracks = []
+        offset = 0
+        while True:
+            results = sp.playlist_items(
+                target_playlist_id, 
+                limit=100, 
+                offset=offset,
+                fields="items(track(id,name,duration_ms,artists(id,name),external_ids,is_playable,is_local)),next",
+                market=user_market
+            )
+            if not results['items']:
+                break
+            for item in results['items']:
+                track = item.get('track')
+                if track and track.get('id'):
+                    target_tracks.append(track)
+            offset += 100
+        
+        print(f"Found {len(target_tracks)} tracks in target playlist.")
+
+        # 4. Remove unavailable tracks
+        unavailable_tracks = []
+        available_target_tracks = []
+        for track in target_tracks:
+            is_local = track.get('is_local', False)
+            is_playable = track.get('is_playable', True)
+            
+            if is_local or not is_playable:
+                unavailable_tracks.append(track)
+            else:
+                available_target_tracks.append(track)
+        
+        print(f"Found {len(unavailable_tracks)} unavailable tracks.")
+
+        # 5. Build the filter tracks list with full details
         print("Building filter list...")
+        all_filter_tracks = []
         all_filter_song_ids = set()
 
         if include_liked_songs:
@@ -168,81 +211,183 @@ def run_filter():
                 if not results['items']:
                     break
                 for item in results['items']:
-                    if item['track'] and item['track']['id']:
-                        all_filter_song_ids.add(item['track']['id'])
+                    track = item.get('track')
+                    if track and track.get('id'):
+                        all_filter_tracks.append(track)
+                        all_filter_song_ids.add(track['id'])
                 offset += 50
         
         for filter_pid in filter_playlist_ids:
-            if filter_pid == "liked_songs": continue 
+            if filter_pid == "liked_songs":
+                continue
             
             filter_playlist_name = sp.playlist(filter_pid, fields='name')['name']
             print(f"Fetching songs from filter playlist: '{filter_playlist_name}'...")
             offset = 0
             while True:
-                results = sp.playlist_items(filter_pid, limit=100, offset=offset, fields="items(track(id)), next")
+                results = sp.playlist_items(
+                    filter_pid, 
+                    limit=100, 
+                    offset=offset, 
+                    fields="items(track(id,name,duration_ms,artists(id,name),external_ids)),next"
+                )
                 if not results['items']:
                     break
                 for item in results['items']:
-                    if item['track'] and item['track']['id']:
-                        all_filter_song_ids.add(item['track']['id'])
+                    track = item.get('track')
+                    if track and track.get('id'):
+                        all_filter_tracks.append(track)
+                        all_filter_song_ids.add(track['id'])
                 offset += 100
         
-        print(f"Total unique songs in filter: {len(all_filter_song_ids)}")
+        print(f"Total filter tracks: {len(all_filter_tracks)}, unique IDs: {len(all_filter_song_ids)}")
 
-        # 4. Find songs in the target playlist that are in our filter set
-        print(f"Scanning target playlist: '{playlist_name}'")
+        # 6. Find exact ID matches (original behavior)
+        exact_matches = []
+        remaining_tracks = []
+        for track in available_target_tracks:
+            if track['id'] in all_filter_song_ids:
+                exact_matches.append({'track': track, 'reason': 'Exact match in filter playlist'})
+            else:
+                remaining_tracks.append(track)
         
-        # We now store {'id': ..., 'name': ...}
-        tracks_to_remove = [] 
-        offset = 0
-        while True:
-            results = sp.playlist_items(target_playlist_id, limit=100, offset=offset, fields="items(track(id, name)), next")
-            if not results['items']:
-                break
+        print(f"Found {len(exact_matches)} exact ID matches.")
+
+        # 7. Find fuzzy duplicates between target and filter playlists
+        print("Scanning for fuzzy duplicates against filter playlists...")
+        fuzzy_duplicates, cross_warnings = find_duplicates_and_warnings(remaining_tracks, all_filter_tracks)
+        
+        # Update remaining tracks (remove the fuzzy duplicates)
+        fuzzy_dup_ids = {d[0]['id'] for d in fuzzy_duplicates}
+        remaining_tracks = [t for t in remaining_tracks if t['id'] not in fuzzy_dup_ids]
+        
+        print(f"Found {len(fuzzy_duplicates)} fuzzy duplicates, {len(cross_warnings)} warnings.")
+
+        # 8. Find internal duplicates within the target playlist
+        print("Scanning for internal duplicates...")
+        internal_duplicates = find_internal_duplicates(remaining_tracks)
+        
+        print(f"Found {len(internal_duplicates)} internal duplicates.")
+
+        # 9. Compile all tracks to remove
+        tracks_to_remove = []
+        removal_details = []
+        
+        # Add unavailable tracks
+        for track in unavailable_tracks:
+            tracks_to_remove.append(track['id'])
+            removal_details.append({
+                'name': track.get('name', 'Unknown'),
+                'artists': ', '.join(a.get('name', '') for a in track.get('artists', [])),
+                'reason': '🚫 Unavailable in your region'
+            })
+        
+        # Add exact matches
+        for match in exact_matches:
+            track = match['track']
+            tracks_to_remove.append(track['id'])
+            removal_details.append({
+                'name': track.get('name', 'Unknown'),
+                'artists': ', '.join(a.get('name', '') for a in track.get('artists', [])),
+                'reason': '✓ Exact match in filter playlist'
+            })
+        
+        # Add fuzzy duplicates
+        for target_track, match_track, score, reasons in fuzzy_duplicates:
+            tracks_to_remove.append(target_track['id'])
+            match_name = match_track.get('name', 'Unknown')
+            removal_details.append({
+                'name': target_track.get('name', 'Unknown'),
+                'artists': ', '.join(a.get('name', '') for a in target_track.get('artists', [])),
+                'reason': f'🔄 Similar to "{match_name}" ({score}pts: {", ".join(reasons)})'
+            })
+        
+        # Add internal duplicates
+        for dup_track, original_track, score, reasons in internal_duplicates:
+            tracks_to_remove.append(dup_track['id'])
+            original_name = original_track.get('name', 'Unknown')
+            removal_details.append({
+                'name': dup_track.get('name', 'Unknown'),
+                'artists': ', '.join(a.get('name', '') for a in dup_track.get('artists', [])),
+                'reason': f'📋 Duplicate of "{original_name}" in playlist ({score}pts: {", ".join(reasons)})'
+            })
+
+        # 10. Remove the songs in batches
+        if tracks_to_remove:
+            print(f"Removing {len(tracks_to_remove)} songs...")
+            # Remove duplicates from the removal list (in case same track flagged multiple times)
+            unique_tracks_to_remove = list(dict.fromkeys(tracks_to_remove))
             
-            for item in results['items']:
-                track = item['track']
-                if not track or not track['id']:
-                    continue
-                
-                if track['id'] in all_filter_song_ids:
-                    print(f"  -> Found match: {track['name']}")
-                    tracks_to_remove.append({'id': track['id'], 'name': track['name']})
-            offset += 100
-        
-        # 5. Remove the songs in batches
-        if not tracks_to_remove:
-            return f"All done! No songs to remove from '{playlist_name}'."
+            for i in range(0, len(unique_tracks_to_remove), 100):
+                batch = unique_tracks_to_remove[i:i+100]
+                sp.playlist_remove_all_occurrences_of_items(target_playlist_id, batch)
+                print(f"Removed batch {i//100 + 1}...")
 
-        print(f"Removing {len(tracks_to_remove)} songs...")
+        # 11. Build HTML response
+        html_parts = []
         
-        # Get just the IDs for the API call
-        tracks_to_remove_ids = [t['id'] for t in tracks_to_remove]
+        # Summary
+        total_removed = len(set(tracks_to_remove))
+        if total_removed > 0:
+            html_parts.append(f"<div style='color: #1DB954; font-size: 1.2rem; margin-bottom: 1rem;'>✅ Removed {total_removed} songs from '{escape_html(playlist_name)}'</div>")
+        else:
+            html_parts.append(f"<div style='color: #1DB954;'>✅ No songs to remove from '{escape_html(playlist_name)}'</div>")
         
-        for i in range(0, len(tracks_to_remove_ids), 100):
-            batch = tracks_to_remove_ids[i:i+100]
-            sp.playlist_remove_all_occurrences_of_items(target_playlist_id, batch)
-            print(f"Removed batch {i//100 + 1}...")
+        # Breakdown
+        if unavailable_tracks:
+            html_parts.append(f"<div style='margin: 0.5rem 0;'>🚫 {len(unavailable_tracks)} unavailable</div>")
+        if exact_matches:
+            html_parts.append(f"<div style='margin: 0.5rem 0;'>✓ {len(exact_matches)} exact matches</div>")
+        if fuzzy_duplicates:
+            html_parts.append(f"<div style='margin: 0.5rem 0;'>🔄 {len(fuzzy_duplicates)} fuzzy duplicates</div>")
+        if internal_duplicates:
+            html_parts.append(f"<div style='margin: 0.5rem 0;'>📋 {len(internal_duplicates)} internal duplicates</div>")
         
-        # Build an HTML response with the list of removed songs
-        song_list_html = "<ul class='removed-song-list'>"
-        for track in tracks_to_remove:
-            # We escape the track name to prevent HTML injection
-            track_name_escaped = (
-                track['name']
-                .replace('&', '&amp;')
-                .replace('<', '&lt;')
-                .replace('>', '&gt;')
-            )
-            song_list_html += f"<li>{track_name_escaped}</li>"
-        song_list_html += "</ul>"
+        # Removed songs list
+        if removal_details:
+            html_parts.append("<h4 style='margin-top: 1.5rem;'>Removed Songs:</h4>")
+            html_parts.append("<ul class='removed-song-list'>")
+            for detail in removal_details:
+                name = escape_html(detail['name'])
+                artists = escape_html(detail['artists'])
+                reason = escape_html(detail['reason'])
+                html_parts.append(f"<li><strong>{name}</strong> - {artists}<br><small style='color: #aaa;'>{reason}</small></li>")
+            html_parts.append("</ul>")
         
-        success_message = f"✅ Success! Removed {len(tracks_to_remove)} songs from '{playlist_name}'."
-        return f"<div>{success_message}</div><br><h4>Removed Songs:</h4>{song_list_html}"
+        # Warnings section
+        if cross_warnings:
+            html_parts.append("<h4 style='margin-top: 1.5rem; color: #FFA500;'>⚠️ Potential Duplicates (not removed):</h4>")
+            html_parts.append("<p style='color: #aaa; font-size: 0.9rem;'>These songs are similar but didn't meet the threshold for automatic removal.</p>")
+            html_parts.append("<ul class='removed-song-list' style='border-left: 3px solid #FFA500;'>")
+            for target_track, similar_track, score, reasons in cross_warnings[:20]:  # Limit to 20 warnings
+                t_name = escape_html(target_track.get('name', 'Unknown'))
+                t_artists = escape_html(', '.join(a.get('name', '') for a in target_track.get('artists', [])))
+                s_name = escape_html(similar_track.get('name', 'Unknown'))
+                html_parts.append(f"<li><strong>{t_name}</strong> - {t_artists}<br><small style='color: #FFA500;'>Similar to \"{s_name}\" ({score}pts: {', '.join(reasons)})</small></li>")
+            if len(cross_warnings) > 20:
+                html_parts.append(f"<li style='color: #aaa;'>...and {len(cross_warnings) - 20} more warnings</li>")
+            html_parts.append("</ul>")
+        
+        return ''.join(html_parts)
 
     except Exception as e:
         print(f"An error occurred: {e}")
+        import traceback
+        traceback.print_exc()
         return f"An error occurred: {e}", 500
+
+
+def escape_html(text):
+    """Escape HTML special characters."""
+    if not text:
+        return ""
+    return (
+        str(text)
+        .replace('&', '&amp;')
+        .replace('<', '&lt;')
+        .replace('>', '&gt;')
+        .replace('"', '&quot;')
+    )
 
 
 # --- HELPER FUNCTIONS (from our old script) ---
@@ -256,6 +401,283 @@ def get_playlist_id_from_link(link):
         return link.split("spotify:playlist:")[1]
     else:
         return None
+
+
+# --- DUPLICATE DETECTION HELPERS ---
+
+def normalize_title(title):
+    """Normalize a track title for comparison by removing version indicators."""
+    if not title:
+        return ""
+    title = title.lower()
+    # Remove common suffixes that indicate versions
+    patterns = [
+        r'\s*[-–—]\s*remaster(ed)?\s*\d*',
+        r'\s*[-–—]\s*\d+\s*remaster',
+        r'\s*\(remaster(ed)?\s*\d*\)',
+        r'\s*\(deluxe.*?\)',
+        r'\s*\(expanded.*?\)',
+        r'\s*\(anniversary.*?\)',
+        r'\s*\(bonus track.*?\)',
+        r'\s*\(album version.*?\)',
+        r'\s*\(original.*?\)',
+        r'\s*\(single version.*?\)',
+        r'\s*\(radio edit.*?\)',
+        r'\s*\(explicit.*?\)',
+        r'\s*\(clean.*?\)',
+        r'\s*[-–—]\s*live.*$',
+        r'\s*\(live.*?\)',
+        r'\s*\(acoustic.*?\)',
+        r'\s*[-–—]\s*from\s+".*"',
+        r'\s*\(from\s+".*"\)',
+        r'\s*\(from\s+.*?\)',
+        r'\s*[-–—]\s*mono.*$',
+        r'\s*\(mono.*?\)',
+        r'\s*[-–—]\s*stereo.*$',
+        r'\s*\(stereo.*?\)',
+    ]
+    for pattern in patterns:
+        title = re.sub(pattern, '', title, flags=re.IGNORECASE)
+    
+    # Remove featuring artists from title
+    title = re.sub(r'\s*(feat\.?|ft\.?|featuring)\s+.*$', '', title, flags=re.IGNORECASE)
+    title = re.sub(r'\s*\((feat\.?|ft\.?|featuring).*?\)', '', title, flags=re.IGNORECASE)
+    
+    # Remove extra whitespace
+    title = ' '.join(title.split())
+    return title.strip()
+
+
+def fuzzy_title_match(title1, title2):
+    """Returns similarity ratio between two titles (0.0 to 1.0)."""
+    return SequenceMatcher(None, title1, title2).ratio()
+
+
+def duration_within_threshold(duration1, duration2):
+    """Check if two durations are within acceptable threshold."""
+    if not duration1 or not duration2:
+        return False
+    # Use max of 10 seconds or 3% of the longer song
+    max_duration = max(duration1, duration2)
+    threshold = max(10000, max_duration * 0.03)  # in milliseconds
+    return abs(duration1 - duration2) <= threshold
+
+
+def artists_overlap(artists1, artists2):
+    """Check if there's any artist overlap between two tracks."""
+    if not artists1 or not artists2:
+        return False
+    ids1 = {a['id'] for a in artists1 if a.get('id')}
+    ids2 = {a['id'] for a in artists2 if a.get('id')}
+    return len(ids1 & ids2) > 0
+
+
+def artists_exact_match(artists1, artists2):
+    """Check if artist lists match exactly."""
+    if not artists1 or not artists2:
+        return False
+    ids1 = {a['id'] for a in artists1 if a.get('id')}
+    ids2 = {a['id'] for a in artists2 if a.get('id')}
+    return ids1 == ids2 and len(ids1) > 0
+
+
+def get_isrc(track):
+    """Extract ISRC from track if available."""
+    external_ids = track.get('external_ids', {})
+    return external_ids.get('isrc')
+
+
+def calculate_similarity_score(track1, track2):
+    """
+    Calculate similarity score between two tracks.
+    Returns (score, reasons) where score >= 70 means duplicate, 40-69 means warning.
+    """
+    score = 0
+    reasons = []
+    
+    # Check ISRC first (instant match)
+    isrc1 = get_isrc(track1)
+    isrc2 = get_isrc(track2)
+    if isrc1 and isrc2 and isrc1 == isrc2:
+        return (100, ["Same ISRC (identical recording)"])
+    
+    # Title comparison (either/or, not cumulative)
+    norm_title1 = normalize_title(track1.get('name', ''))
+    norm_title2 = normalize_title(track2.get('name', ''))
+    
+    title_score = 0
+    if norm_title1 and norm_title2:
+        if norm_title1 == norm_title2:
+            title_score = 40
+            reasons.append("Exact title match")
+        else:
+            similarity = fuzzy_title_match(norm_title1, norm_title2)
+            if similarity >= 0.9:
+                title_score = 25
+                reasons.append(f"Similar title ({similarity:.0%})")
+    score += title_score
+    
+    # Duration comparison
+    dur1 = track1.get('duration_ms')
+    dur2 = track2.get('duration_ms')
+    if duration_within_threshold(dur1, dur2):
+        score += 30
+        diff_sec = abs(dur1 - dur2) / 1000 if dur1 and dur2 else 0
+        reasons.append(f"Similar duration (±{diff_sec:.1f}s)")
+    
+    # Artist comparison
+    artists1 = track1.get('artists', [])
+    artists2 = track2.get('artists', [])
+    if artists_overlap(artists1, artists2):
+        score += 30
+        reasons.append("Shared artist(s)")
+        if artists_exact_match(artists1, artists2):
+            score += 10
+            reasons[-1] = "Same artist(s)"
+    
+    return (score, reasons)
+
+
+def find_duplicates_and_warnings(target_tracks, filter_tracks):
+    """
+    Find duplicates and potential duplicates between target and filter playlists.
+    
+    Returns:
+        duplicates: list of (target_track, matching_track, score, reasons)
+        warnings: list of (target_track, similar_track, score, reasons)
+    """
+    duplicates = []
+    warnings = []
+    
+    # Build index by normalized title for faster lookup
+    filter_by_title = {}
+    for track in filter_tracks:
+        norm_title = normalize_title(track.get('name', ''))
+        if norm_title:
+            if norm_title not in filter_by_title:
+                filter_by_title[norm_title] = []
+            filter_by_title[norm_title].append(track)
+    
+    # Also index by ISRC for instant matches
+    filter_by_isrc = {}
+    for track in filter_tracks:
+        isrc = get_isrc(track)
+        if isrc:
+            filter_by_isrc[isrc] = track
+    
+    seen_target_ids = set()  # Track which target songs we've already matched
+    
+    for target_track in target_tracks:
+        if not target_track or not target_track.get('id'):
+            continue
+        if target_track['id'] in seen_target_ids:
+            continue
+            
+        target_isrc = get_isrc(target_track)
+        target_norm_title = normalize_title(target_track.get('name', ''))
+        
+        best_match = None
+        best_score = 0
+        best_reasons = []
+        
+        # Check ISRC first
+        if target_isrc and target_isrc in filter_by_isrc:
+            match_track = filter_by_isrc[target_isrc]
+            best_match = match_track
+            best_score = 100
+            best_reasons = ["Same ISRC (identical recording)"]
+        else:
+            # Check tracks with similar titles
+            candidates = []
+            
+            # Exact normalized title matches
+            if target_norm_title in filter_by_title:
+                candidates.extend(filter_by_title[target_norm_title])
+            
+            # Also check fuzzy matches (this is slower but catches more)
+            for norm_title, tracks in filter_by_title.items():
+                if norm_title != target_norm_title:
+                    similarity = fuzzy_title_match(target_norm_title, norm_title)
+                    if similarity >= 0.85:  # Lower threshold for candidate selection
+                        candidates.extend(tracks)
+            
+            # Score each candidate
+            for candidate in candidates:
+                if candidate.get('id') == target_track.get('id'):
+                    continue  # Skip exact same track
+                score, reasons = calculate_similarity_score(target_track, candidate)
+                if score > best_score:
+                    best_score = score
+                    best_match = candidate
+                    best_reasons = reasons
+        
+        if best_match:
+            if best_score >= 70:
+                duplicates.append((target_track, best_match, best_score, best_reasons))
+                seen_target_ids.add(target_track['id'])
+            elif best_score >= 40:
+                warnings.append((target_track, best_match, best_score, best_reasons))
+    
+    return duplicates, warnings
+
+
+def find_internal_duplicates(tracks):
+    """
+    Find duplicates within a single playlist.
+    Returns list of (track_to_remove, original_track, score, reasons)
+    """
+    duplicates = []
+    dominated_ids = set()  # Tracks that are duplicates of something else
+    
+    # Build index
+    by_title = {}
+    by_isrc = {}
+    for track in tracks:
+        if not track or not track.get('id'):
+            continue
+        norm_title = normalize_title(track.get('name', ''))
+        if norm_title:
+            if norm_title not in by_title:
+                by_title[norm_title] = []
+            by_title[norm_title].append(track)
+        isrc = get_isrc(track)
+        if isrc:
+            if isrc not in by_isrc:
+                by_isrc[isrc] = []
+            by_isrc[isrc].append(track)
+    
+    # Check ISRC duplicates first
+    for isrc, isrc_tracks in by_isrc.items():
+        if len(isrc_tracks) > 1:
+            # Keep the first one, mark others as duplicates
+            original = isrc_tracks[0]
+            for dup in isrc_tracks[1:]:
+                if dup['id'] not in dominated_ids:
+                    duplicates.append((dup, original, 100, ["Same ISRC (identical recording)"]))
+                    dominated_ids.add(dup['id'])
+    
+    # Check title-based duplicates
+    for norm_title, title_tracks in by_title.items():
+        if len(title_tracks) <= 1:
+            continue
+        
+        # Compare each pair
+        for i, track1 in enumerate(title_tracks):
+            if track1['id'] in dominated_ids:
+                continue
+            for track2 in title_tracks[i+1:]:
+                if track2['id'] in dominated_ids:
+                    continue
+                if track1['id'] == track2['id']:
+                    continue
+                    
+                score, reasons = calculate_similarity_score(track1, track2)
+                if score >= 70:
+                    # Keep track1, remove track2
+                    duplicates.append((track2, track1, score, reasons))
+                    dominated_ids.add(track2['id'])
+    
+    return duplicates
 
 # --- HTML TEMPLATES ---
 # We are embedding the HTML directly in our Python file for simplicity.
@@ -550,17 +972,21 @@ HTML_APP_PAGE = """
         
         /* Style for the new removed songs list */
         .removed-song-list {
-            max-height: 200px;
+            max-height: 300px;
             overflow-y: auto;
             background: #121212;
             padding: 1rem;
             border-radius: 8px;
             font-size: 0.9rem;
-            list-style-type: decimal;
+            list-style-type: none;
             margin-bottom: 0;
         }
         .removed-song-list li {
-            padding: 0.25rem 0;
+            padding: 0.5rem 0;
+            border-bottom: 1px solid #282828;
+        }
+        .removed-song-list li:last-child {
+            border-bottom: none;
         }
 
     </style>
