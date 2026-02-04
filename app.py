@@ -169,6 +169,7 @@ def run_filter():
 
         # 3. Fetch target playlist tracks with full details
         target_tracks = []
+        seven_rings_in_fetch = []  # Debug
         offset = 0
         while True:
             results = sp.playlist_items(
@@ -184,6 +185,9 @@ def run_filter():
                 track = item.get('track')
                 if track and track.get('id'):
                     target_tracks.append(track)
+                    # Debug: track all 7 rings during fetch
+                    if track.get('name') and '7 rings' in track.get('name', '').lower():
+                        seven_rings_in_fetch.append(f"Fetched at offset {offset}: '{track['name']}' ID={track['id']}")
             offset += 100
         
         # Count how many times each track ID appears in target playlist
@@ -333,6 +337,11 @@ def run_filter():
         
         # Debug: Find 7 rings specifically
         seven_rings_debug = []
+        
+        # Show what we found during initial fetch
+        seven_rings_debug.append(f"=== INITIAL FETCH: Found {len(seven_rings_in_fetch)} '7 rings' tracks ===")
+        seven_rings_debug.extend(seven_rings_in_fetch)
+        seven_rings_debug.append(f"=== Total tracks fetched: {len(target_tracks)} ===")
         
         # Check what 7 rings versions exist in target
         for track in target_tracks:
