@@ -3,8 +3,7 @@ import re
 from difflib import SequenceMatcher
 import spotipy
 from spotipy.oauth2 import SpotifyOAuth
-from flask import Flask, redirect, request, session, url_for, render_template_string, Response, stream_with_context
-import json
+from flask import Flask, redirect, request, session, url_for, render_template_string
 from dotenv import load_dotenv
 
 # --- FLASK APP AND SESSION SETUP ---
@@ -139,275 +138,253 @@ def logout():
 @app.route("/run-filter", methods=["POST"])
 def run_filter():
     """
-    This is the main logic. It runs when the user submits the form.
-    Uses streaming response for progress updates.
+    Main filtering logic. Processes the form and redirects to results page.
     """
     sp = get_spotify_client()
     if not sp:
-        return "Error: Not authenticated. Please log in again.", 401
+        return redirect(url_for("index"))
 
-    def generate():
-        try:
-            # Helper to send progress updates
-            def send_progress(step, message):
-                yield f"data: {json.dumps({'type': 'progress', 'step': step, 'message': message})}\n\n"
-            
-            # 1. Get data from the submitted form
-            form_data = request.form
-            target_playlist_link = form_data.get("target_playlist")
-            filter_playlist_ids = form_data.getlist("filter_playlists")
-            include_liked_songs = form_data.get("include_liked_songs") == "on"
-            
-            # 2. Get ID from the target playlist link
-            target_playlist_id = get_playlist_id_from_link(target_playlist_link)
-            if not target_playlist_id:
-                yield f"data: {json.dumps({'type': 'error', 'message': 'Invalid Target Playlist link.'})}\n\n"
-                return
-            
-            playlist_name = sp.playlist(target_playlist_id, fields='name')['name']
-            
-            # Get user's market for availability checking
-            user_info = sp.current_user()
-            user_market = user_info.get('country', 'US')
+    try:
+        # 1. Get data from the submitted form
+        form_data = request.form
+        target_playlist_link = form_data.get("target_playlist")
+        filter_playlist_ids = form_data.getlist("filter_playlists")
+        include_liked_songs = form_data.get("include_liked_songs") == "on"
+        
+        # 2. Get ID from the target playlist link
+        target_playlist_id = get_playlist_id_from_link(target_playlist_link)
+        if not target_playlist_id:
+            return render_template_string(HTML_RESULTS_PAGE, 
+                logo=LOGO_IMG,
+                error="Invalid Target Playlist link.",
+                playlist_name="Unknown",
+                results=None
+            )
+        
+        playlist_name = sp.playlist(target_playlist_id, fields='name')['name']
+        
+        # Get user's market for availability checking
+        user_info = sp.current_user()
+        user_market = user_info.get('country', 'US')
 
-            # 3. Fetch target playlist tracks with full details
-            yield from send_progress(1, f"Fetching target playlist: '{playlist_name}'...")
-            target_tracks = []
+        # 3. Fetch target playlist tracks with full details
+        target_tracks = []
+        offset = 0
+        while True:
+            results = sp.playlist_items(
+                target_playlist_id, 
+                limit=100, 
+                offset=offset,
+                fields="items(track(id,name,duration_ms,artists(id,name),external_ids,is_playable,is_local)),next",
+                market=user_market
+            )
+            if not results['items']:
+                break
+            for item in results['items']:
+                track = item.get('track')
+                if track and track.get('id'):
+                    target_tracks.append(track)
+            offset += 100
+        
+        # Count how many times each track ID appears in target playlist
+        target_id_counts = {}
+        for track in target_tracks:
+            tid = track['id']
+            target_id_counts[tid] = target_id_counts.get(tid, 0) + 1
+
+        # 4. Separate unavailable tracks
+        unavailable_tracks = []
+        available_target_tracks = []
+        seen_unavailable_ids = set()
+        
+        for track in target_tracks:
+            is_local = track.get('is_local', False)
+            is_playable = track.get('is_playable', True)
+            
+            if is_local or not is_playable:
+                if track['id'] not in seen_unavailable_ids:
+                    unavailable_tracks.append(track)
+                    seen_unavailable_ids.add(track['id'])
+            else:
+                available_target_tracks.append(track)
+
+        # 5. Build the filter tracks list with full details
+        all_filter_tracks = []
+        all_filter_song_ids = set()
+
+        if include_liked_songs:
+            offset = 0
+            while True:
+                results = sp.current_user_saved_tracks(limit=50, offset=offset)
+                if not results['items']:
+                    break
+                for item in results['items']:
+                    track = item.get('track')
+                    if track and track.get('id'):
+                        all_filter_tracks.append(track)
+                        all_filter_song_ids.add(track['id'])
+                offset += 50
+        
+        for filter_pid in filter_playlist_ids:
+            if filter_pid == "liked_songs":
+                continue
+            
             offset = 0
             while True:
                 results = sp.playlist_items(
-                    target_playlist_id, 
+                    filter_pid, 
                     limit=100, 
-                    offset=offset,
-                    fields="items(track(id,name,duration_ms,artists(id,name),external_ids,is_playable,is_local)),next",
-                    market=user_market
+                    offset=offset, 
+                    fields="items(track(id,name,duration_ms,artists(id,name),external_ids)),next"
                 )
                 if not results['items']:
                     break
                 for item in results['items']:
                     track = item.get('track')
                     if track and track.get('id'):
-                        target_tracks.append(track)
+                        all_filter_tracks.append(track)
+                        all_filter_song_ids.add(track['id'])
                 offset += 100
-            
-            # Count how many times each track ID appears in target playlist
-            target_id_counts = {}
-            for track in target_tracks:
-                tid = track['id']
-                target_id_counts[tid] = target_id_counts.get(tid, 0) + 1
 
-            # 4. Separate unavailable tracks
-            yield from send_progress(2, "Checking for unavailable tracks...")
-            unavailable_tracks = []
-            available_target_tracks = []
-            seen_unavailable_ids = set()
-            
-            for track in target_tracks:
-                is_local = track.get('is_local', False)
-                is_playable = track.get('is_playable', True)
-                
-                if is_local or not is_playable:
-                    if track['id'] not in seen_unavailable_ids:
-                        unavailable_tracks.append(track)
-                        seen_unavailable_ids.add(track['id'])
-                else:
-                    available_target_tracks.append(track)
-
-            # 5. Build the filter tracks list with full details
-            yield from send_progress(3, "Building filter list...")
-            all_filter_tracks = []
-            all_filter_song_ids = set()
-
-            if include_liked_songs:
-                yield from send_progress(3, "Fetching Liked Songs...")
-                offset = 0
-                while True:
-                    results = sp.current_user_saved_tracks(limit=50, offset=offset)
-                    if not results['items']:
-                        break
-                    for item in results['items']:
-                        track = item.get('track')
-                        if track and track.get('id'):
-                            all_filter_tracks.append(track)
-                            all_filter_song_ids.add(track['id'])
-                    offset += 50
-            
-            for idx, filter_pid in enumerate(filter_playlist_ids):
-                if filter_pid == "liked_songs":
-                    continue
-                
-                filter_playlist_name = sp.playlist(filter_pid, fields='name')['name']
-                yield from send_progress(3, f"Fetching playlist {idx+1}/{len(filter_playlist_ids)}: '{filter_playlist_name}'...")
-                offset = 0
-                while True:
-                    results = sp.playlist_items(
-                        filter_pid, 
-                        limit=100, 
-                        offset=offset, 
-                        fields="items(track(id,name,duration_ms,artists(id,name),external_ids)),next"
-                    )
-                    if not results['items']:
-                        break
-                    for item in results['items']:
-                        track = item.get('track')
-                        if track and track.get('id'):
-                            all_filter_tracks.append(track)
-                            all_filter_song_ids.add(track['id'])
-                    offset += 100
-
-            # 6. Find exact ID matches - deduplicate by track ID
-            yield from send_progress(4, "Finding exact matches...")
-            exact_matches = []
-            remaining_tracks = []
-            seen_exact_ids = set()
-            
-            for track in available_target_tracks:
-                if track['id'] in all_filter_song_ids:
-                    if track['id'] not in seen_exact_ids:
-                        exact_matches.append({'track': track, 'reason': 'Exact match in filter playlist'})
-                        seen_exact_ids.add(track['id'])
-                else:
-                    remaining_tracks.append(track)
-
-            # 7. Deduplicate remaining_tracks for fuzzy matching
-            remaining_unique = []
-            seen_remaining_ids = set()
-            for track in remaining_tracks:
-                if track['id'] not in seen_remaining_ids:
-                    remaining_unique.append(track)
-                    seen_remaining_ids.add(track['id'])
-
-            # 8. Find fuzzy duplicates between target and filter playlists
-            yield from send_progress(5, "Scanning for fuzzy duplicates...")
-            fuzzy_duplicates, cross_warnings = find_duplicates_and_warnings(remaining_unique, all_filter_tracks)
-            
-            fuzzy_dup_ids = {d[0]['id'] for d in fuzzy_duplicates}
-            remaining_after_fuzzy = [t for t in remaining_unique if t['id'] not in fuzzy_dup_ids]
-
-            # 9. Find internal duplicates within the target playlist
-            yield from send_progress(6, "Scanning for internal duplicates...")
-            internal_duplicates = find_internal_duplicates(remaining_after_fuzzy)
-
-            # 10. Compile all tracks to remove (unique IDs only)
-            tracks_to_remove_ids = set()
-            removal_details = []
-            
-            for track in unavailable_tracks:
-                tracks_to_remove_ids.add(track['id'])
-                removal_details.append({
-                    'name': track.get('name', 'Unknown'),
-                    'artists': ', '.join(a.get('name', '') for a in track.get('artists', [])),
-                    'reason': '🚫 Unavailable in your region',
-                    'score': 0,
-                    'category': 'unavailable'
-                })
-            
-            for match in exact_matches:
-                track = match['track']
-                tracks_to_remove_ids.add(track['id'])
-                removal_details.append({
-                    'name': track.get('name', 'Unknown'),
-                    'artists': ', '.join(a.get('name', '') for a in track.get('artists', [])),
-                    'reason': '✓ Exact match in filter playlist',
-                    'score': 100,
-                    'category': 'exact'
-                })
-            
-            fuzzy_duplicates_sorted = sorted(fuzzy_duplicates, key=lambda x: x[2], reverse=True)
-            for target_track, match_track, score, reasons in fuzzy_duplicates_sorted:
-                tracks_to_remove_ids.add(target_track['id'])
-                match_name = match_track.get('name', 'Unknown')
-                removal_details.append({
-                    'name': target_track.get('name', 'Unknown'),
-                    'artists': ', '.join(a.get('name', '') for a in target_track.get('artists', [])),
-                    'reason': f'🔄 Similar to "{match_name}" ({score}pts: {", ".join(reasons)})',
-                    'score': score,
-                    'category': 'fuzzy'
-                })
-            
-            internal_duplicates_sorted = sorted(internal_duplicates, key=lambda x: x[2], reverse=True)
-            for dup_track, original_track, score, reasons in internal_duplicates_sorted:
-                tracks_to_remove_ids.add(dup_track['id'])
-                original_name = original_track.get('name', 'Unknown')
-                removal_details.append({
-                    'name': dup_track.get('name', 'Unknown'),
-                    'artists': ', '.join(a.get('name', '') for a in dup_track.get('artists', [])),
-                    'reason': f'📋 Duplicate of "{original_name}" in playlist ({score}pts: {", ".join(reasons)})',
-                    'score': score,
-                    'category': 'internal'
-                })
-
-            # 11. Remove the songs in batches
-            actual_removals = 0
-            if tracks_to_remove_ids:
-                yield from send_progress(7, f"Removing {len(tracks_to_remove_ids)} tracks...")
-                tracks_list = list(tracks_to_remove_ids)
-                
-                for i in range(0, len(tracks_list), 100):
-                    batch = tracks_list[i:i+100]
-                    sp.playlist_remove_all_occurrences_of_items(target_playlist_id, batch)
-                    for tid in batch:
-                        actual_removals += target_id_counts.get(tid, 1)
-                    yield from send_progress(7, f"Removed {min(i+100, len(tracks_list))}/{len(tracks_list)} tracks...")
-
-            # 12. Build HTML response
-            html_parts = []
-            
-            if actual_removals > 0:
-                html_parts.append(f"<div style='color: #1DB954; font-size: 1.2rem; margin-bottom: 1rem;'>✅ Removed {actual_removals} songs from '{escape_html(playlist_name)}'</div>")
-                if actual_removals != len(tracks_to_remove_ids):
-                    html_parts.append(f"<div style='color: #aaa; font-size: 0.9rem; margin-bottom: 1rem;'>({len(tracks_to_remove_ids)} unique tracks, {actual_removals - len(tracks_to_remove_ids)} were duplicates in playlist)</div>")
+        # 6. Find exact ID matches - deduplicate by track ID
+        exact_matches = []
+        remaining_tracks = []
+        seen_exact_ids = set()
+        
+        for track in available_target_tracks:
+            if track['id'] in all_filter_song_ids:
+                if track['id'] not in seen_exact_ids:
+                    exact_matches.append({'track': track, 'reason': 'Exact match in filter playlist'})
+                    seen_exact_ids.add(track['id'])
             else:
-                html_parts.append(f"<div style='color: #1DB954;'>✅ No songs to remove from '{escape_html(playlist_name)}'</div>")
-            
-            if unavailable_tracks:
-                html_parts.append(f"<div style='margin: 0.5rem 0;'>🚫 {len(unavailable_tracks)} unavailable</div>")
-            if exact_matches:
-                html_parts.append(f"<div style='margin: 0.5rem 0;'>✓ {len(exact_matches)} exact matches</div>")
-            if fuzzy_duplicates:
-                html_parts.append(f"<div style='margin: 0.5rem 0;'>🔄 {len(fuzzy_duplicates)} fuzzy duplicates</div>")
-            if internal_duplicates:
-                html_parts.append(f"<div style='margin: 0.5rem 0;'>📋 {len(internal_duplicates)} internal duplicates</div>")
-            
-            category_order = {'exact': 0, 'fuzzy': 1, 'internal': 2, 'unavailable': 3}
-            removal_details_sorted = sorted(
-                removal_details, 
-                key=lambda x: (-x['score'], category_order.get(x['category'], 99))
-            )
-            
-            if removal_details_sorted:
-                html_parts.append("<h4 style='margin-top: 1.5rem;'>Removed Songs:</h4>")
-                html_parts.append("<ul class='removed-song-list'>")
-                for detail in removal_details_sorted:
-                    name = escape_html(detail['name'])
-                    artists = escape_html(detail['artists'])
-                    reason = escape_html(detail['reason'])
-                    html_parts.append(f"<li><strong>{name}</strong> - {artists}<br><small style='color: #aaa;'>{reason}</small></li>")
-                html_parts.append("</ul>")
-            
-            cross_warnings_sorted = sorted(cross_warnings, key=lambda x: x[2], reverse=True)
-            if cross_warnings_sorted:
-                html_parts.append("<h4 style='margin-top: 1.5rem; color: #FFA500;'>⚠️ Potential Duplicates (not removed):</h4>")
-                html_parts.append("<p style='color: #aaa; font-size: 0.9rem;'>These songs are similar but didn't meet the threshold for automatic removal.</p>")
-                html_parts.append("<ul class='removed-song-list' style='border-left: 3px solid #FFA500;'>")
-                for target_track, similar_track, score, reasons in cross_warnings_sorted[:20]:
-                    t_name = escape_html(target_track.get('name', 'Unknown'))
-                    t_artists = escape_html(', '.join(a.get('name', '') for a in target_track.get('artists', [])))
-                    s_name = escape_html(similar_track.get('name', 'Unknown'))
-                    html_parts.append(f"<li><strong>{t_name}</strong> - {t_artists}<br><small style='color: #FFA500;'>Similar to \"{s_name}\" ({score}pts: {', '.join(reasons)})</small></li>")
-                if len(cross_warnings_sorted) > 20:
-                    html_parts.append(f"<li style='color: #aaa;'>...and {len(cross_warnings_sorted) - 20} more warnings</li>")
-                html_parts.append("</ul>")
-            
-            yield f"data: {json.dumps({'type': 'complete', 'html': ''.join(html_parts)})}\n\n"
+                remaining_tracks.append(track)
 
-        except Exception as e:
-            print(f"An error occurred: {e}")
-            import traceback
-            traceback.print_exc()
-            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+        # 7. Deduplicate remaining_tracks for fuzzy matching
+        remaining_unique = []
+        seen_remaining_ids = set()
+        for track in remaining_tracks:
+            if track['id'] not in seen_remaining_ids:
+                remaining_unique.append(track)
+                seen_remaining_ids.add(track['id'])
 
-    return Response(stream_with_context(generate()), mimetype='text/event-stream')
+        # 8. Find fuzzy duplicates between target and filter playlists
+        fuzzy_duplicates, cross_warnings = find_duplicates_and_warnings(remaining_unique, all_filter_tracks)
+        
+        fuzzy_dup_ids = {d[0]['id'] for d in fuzzy_duplicates}
+        remaining_after_fuzzy = [t for t in remaining_unique if t['id'] not in fuzzy_dup_ids]
+
+        # 9. Find internal duplicates within the target playlist
+        internal_duplicates = find_internal_duplicates(remaining_after_fuzzy)
+
+        # 10. Compile all tracks to remove (unique IDs only)
+        tracks_to_remove_ids = set()
+        removal_details = []
+        
+        for track in unavailable_tracks:
+            tracks_to_remove_ids.add(track['id'])
+            removal_details.append({
+                'name': track.get('name', 'Unknown'),
+                'artists': ', '.join(a.get('name', '') for a in track.get('artists', [])),
+                'reason': '🚫 Unavailable in your region',
+                'score': 0,
+                'category': 'unavailable'
+            })
+        
+        for match in exact_matches:
+            track = match['track']
+            tracks_to_remove_ids.add(track['id'])
+            removal_details.append({
+                'name': track.get('name', 'Unknown'),
+                'artists': ', '.join(a.get('name', '') for a in track.get('artists', [])),
+                'reason': '✓ Exact match in filter playlist',
+                'score': 100,
+                'category': 'exact'
+            })
+        
+        fuzzy_duplicates_sorted = sorted(fuzzy_duplicates, key=lambda x: x[2], reverse=True)
+        for target_track, match_track, score, reasons in fuzzy_duplicates_sorted:
+            tracks_to_remove_ids.add(target_track['id'])
+            match_name = match_track.get('name', 'Unknown')
+            removal_details.append({
+                'name': target_track.get('name', 'Unknown'),
+                'artists': ', '.join(a.get('name', '') for a in target_track.get('artists', [])),
+                'reason': f'🔄 Similar to "{match_name}" ({score}pts: {", ".join(reasons)})',
+                'score': score,
+                'category': 'fuzzy'
+            })
+        
+        internal_duplicates_sorted = sorted(internal_duplicates, key=lambda x: x[2], reverse=True)
+        for dup_track, original_track, score, reasons in internal_duplicates_sorted:
+            tracks_to_remove_ids.add(dup_track['id'])
+            original_name = original_track.get('name', 'Unknown')
+            removal_details.append({
+                'name': dup_track.get('name', 'Unknown'),
+                'artists': ', '.join(a.get('name', '') for a in dup_track.get('artists', [])),
+                'reason': f'📋 Duplicate of "{original_name}" in playlist ({score}pts: {", ".join(reasons)})',
+                'score': score,
+                'category': 'internal'
+            })
+
+        # 11. Remove the songs in batches
+        actual_removals = 0
+        if tracks_to_remove_ids:
+            tracks_list = list(tracks_to_remove_ids)
+            
+            for i in range(0, len(tracks_list), 100):
+                batch = tracks_list[i:i+100]
+                sp.playlist_remove_all_occurrences_of_items(target_playlist_id, batch)
+                for tid in batch:
+                    actual_removals += target_id_counts.get(tid, 1)
+
+        # Sort removal details and warnings
+        category_order = {'exact': 0, 'fuzzy': 1, 'internal': 2, 'unavailable': 3}
+        removal_details_sorted = sorted(
+            removal_details, 
+            key=lambda x: (-x['score'], category_order.get(x['category'], 99))
+        )
+        cross_warnings_sorted = sorted(cross_warnings, key=lambda x: x[2], reverse=True)
+        
+        # Prepare warnings for template
+        warnings_for_template = []
+        for target_track, similar_track, score, reasons in cross_warnings_sorted[:30]:
+            warnings_for_template.append({
+                'name': target_track.get('name', 'Unknown'),
+                'artists': ', '.join(a.get('name', '') for a in target_track.get('artists', [])),
+                'similar_to': similar_track.get('name', 'Unknown'),
+                'score': score,
+                'reasons': ', '.join(reasons)
+            })
+
+        # Build results dict
+        results = {
+            'actual_removals': actual_removals,
+            'unique_tracks': len(tracks_to_remove_ids),
+            'unavailable_count': len(unavailable_tracks),
+            'exact_count': len(exact_matches),
+            'fuzzy_count': len(fuzzy_duplicates),
+            'internal_count': len(internal_duplicates),
+            'removal_details': removal_details_sorted,
+            'warnings': warnings_for_template,
+            'warnings_total': len(cross_warnings_sorted)
+        }
+
+        return render_template_string(HTML_RESULTS_PAGE,
+            logo=LOGO_IMG,
+            error=None,
+            playlist_name=playlist_name,
+            results=results
+        )
+
+    except Exception as e:
+        print(f"An error occurred: {e}")
+        import traceback
+        traceback.print_exc()
+        return render_template_string(HTML_RESULTS_PAGE,
+            logo=LOGO_IMG,
+            error=str(e),
+            playlist_name="Unknown",
+            results=None
+        )
 
 
 def escape_html(text):
@@ -841,8 +818,6 @@ HTML_APP_PAGE = """
             color: #fff; 
             margin: 0; 
             padding: 2rem;
-            
-            /* The new animated background */
             background: linear-gradient(-45deg, #121212, #191919, #0d2a14, #191919);
             background-size: 400% 400%;
             animation: gradientBG 25s ease infinite;
@@ -862,11 +837,7 @@ HTML_APP_PAGE = """
             padding-bottom: 2rem; 
             margin-bottom: 2rem;
         }
-        .header .title {
-            display: flex;
-            align-items: center;
-            gap: 1rem;
-        }
+        .header .title { display: flex; align-items: center; gap: 1rem; }
         .header h1 { margin: 0; }
         .header span { font-size: 0.9rem; }
         .logout-btn { background: #333; color: white; text-decoration: none; padding: 0.5rem 1rem; border-radius: 500px; font-size: 0.9rem; font-weight: bold; }
@@ -1055,8 +1026,8 @@ HTML_APP_PAGE = """
         <span>Logged in as: <b>{{ user_name }}</b> <a href="{{ url_for('logout') }}" class="logout-btn">Logout</a></span>
     </div>
 
-    <!-- Form now wraps both columns -->
-    <form id="filter-form">
+
+    <form method="POST" action="{{ url_for('run_filter') }}" id="filter-form">
     <div class="content">
         <div class="box target-card">
             <h2>1. Target Playlist</h2>
@@ -1065,45 +1036,30 @@ HTML_APP_PAGE = """
                 <label for="target_playlist">Target Playlist Link</label>
                 <input type="text" id="target_playlist" name="target_playlist" required placeholder="https://open.spotify.com/playlist/...">
             </div>
-            
             <h2>3. Run Filter</h2>
             <p>This will permanently remove songs from your target playlist.</p>
-            <button type="submit" class="submit-btn">Start Filtering</button>
+            <button type="submit" class="submit-btn" id="submit-btn">Start Filtering</button>
         </div>
 
         <div class="box filter-card">
             <h2>2. Filter Playlists</h2>
             <p>Select which songs to remove. Any song from these sources will be removed from your target playlist.</p>
-            <div class="playlist-list" id="filter-playlists-container">
-                
-                <!-- Styled Liked Songs Item -->
+            <div class="playlist-list">
                 <label class="playlist-item">
                     <input type="checkbox" name="include_liked_songs" checked>
                     <div class="playlist-cover placeholder">
-                        <!-- Inline SVG for a white heart -->
-                        <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="white">
-                            <path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/>
-                        </svg>
+                        <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="white"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>
                     </div>
-                    <div class="playlist-info">
-                        <span class="playlist-name">Your Liked Songs</span>
-                    </div>
+                    <div class="playlist-info"><span class="playlist-name">Your Liked Songs</span></div>
                 </label>
-                
-                <!-- Playlists will be populated here -->
                 {% for playlist in playlists %}
                 <label class="playlist-item">
                     <input type="checkbox" name="filter_playlists" value="{{ playlist.id }}">
-                    
                     {% if playlist.images and playlist.images|length > 0 %}
                         <img src="{{ playlist.images[-1].url }}" alt="{{ playlist.name }} cover" class="playlist-cover">
                     {% else %}
-                        <!-- Placeholder for playlists with no image -->
-                        <div class="playlist-cover placeholder">
-                            <span>🎵</span>
-                        </div>
+                        <div class="playlist-cover placeholder"><span>🎵</span></div>
                     {% endif %}
-
                     <div class="playlist-info">
                         <span class="playlist-name">{{ playlist.name }}</span>
                         <span class="playlist-count">{{ playlist.tracks.total }} songs</span>
@@ -1113,98 +1069,102 @@ HTML_APP_PAGE = """
             </div>
         </div>
     </div>
-    </form> <!-- Form tag closes here -->
-    
-    <div style="max-width: 1400px; margin-left: auto; margin-right: auto;">
-        <div id="response-box"></div>
-    </div>
-
+    </form>
     <script>
-        document.getElementById('filter-form').addEventListener('submit', async function(e) {
-            e.preventDefault();
-            
-            const form = e.target;
-            const formData = new FormData(form);
-            const submitBtn = form.querySelector('.submit-btn');
-            const responseBox = document.getElementById('response-box');
-            
-            submitBtn.disabled = true;
-            submitBtn.textContent = 'Filtering...';
-            responseBox.style.display = 'block';
-            responseBox.style.color = '#fff';
-            
-            // Progress steps
-            const steps = [
-                'Initializing...',
-                'Fetching target playlist...',
-                'Checking availability...',
-                'Building filter list...',
-                'Finding exact matches...',
-                'Scanning for fuzzy duplicates...',
-                'Scanning for internal duplicates...',
-                'Removing tracks...'
-            ];
-            
-            // Show progress UI
-            responseBox.innerHTML = `
-                <div class="progress-container">
-                    <div class="progress-bar"><div class="progress-fill" id="progress-fill"></div></div>
-                    <div class="progress-text" id="progress-text">Starting...</div>
-                </div>
-            `;
-            
-            try {
-                const response = await fetch("{{ url_for('run_filter') }}", {
-                    method: 'POST',
-                    body: formData
-                });
-                
-                const reader = response.body.getReader();
-                const decoder = new TextDecoder();
-                let buffer = '';
-                
-                while (true) {
-                    const { done, value } = await reader.read();
-                    if (done) break;
-                    
-                    buffer += decoder.decode(value, { stream: true });
-                    const lines = buffer.split('\n\n');
-                    buffer = lines.pop() || '';
-                    
-                    for (const line of lines) {
-                        if (line.startsWith('data: ')) {
-                            try {
-                                const data = JSON.parse(line.slice(6));
-                                
-                                if (data.type === 'progress') {
-                                    const progressFill = document.getElementById('progress-fill');
-                                    const progressText = document.getElementById('progress-text');
-                                    const percent = (data.step / 7) * 100;
-                                    progressFill.style.width = percent + '%';
-                                    progressText.textContent = data.message;
-                                } else if (data.type === 'complete') {
-                                    responseBox.style.color = '#1DB954';
-                                    responseBox.innerHTML = data.html;
-                                } else if (data.type === 'error') {
-                                    responseBox.style.color = '#FF4500';
-                                    responseBox.innerHTML = 'Error: ' + data.message;
-                                }
-                            } catch (parseErr) {
-                                console.error('Parse error:', parseErr);
-                            }
-                        }
-                    }
-                }
-                
-            } catch (error) {
-                responseBox.style.color = '#FF4500';
-                responseBox.innerHTML = 'A network error occurred: ' + error.message;
-            } finally {
-                submitBtn.disabled = false;
-                submitBtn.textContent = 'Start Filtering';
-            }
+        document.getElementById('filter-form').addEventListener('submit', function() {
+            var btn = document.getElementById('submit-btn');
+            btn.disabled = true;
+            btn.textContent = 'Filtering... (this may take a while)';
         });
     </script>
+</body>
+</html>
+"""
+
+HTML_RESULTS_PAGE = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Filter Results - Spotify Filterer</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background-color: #121212; color: #fff; margin: 0; padding: 2rem;
+            background: linear-gradient(-45deg, #121212, #191919, #0d2a14, #191919); background-size: 400% 400%; animation: gradientBG 25s ease infinite; }
+        @keyframes gradientBG { 0% { background-position: 0% 50%; } 50% { background-position: 100% 50%; } 100% { background-position: 0% 50%; } }
+        .header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #282828; padding-bottom: 2rem; margin-bottom: 2rem; max-width: 1000px; margin-left: auto; margin-right: auto; }
+        .header .title { display: flex; align-items: center; gap: 1rem; }
+        .header h1 { margin: 0; }
+        .back-btn { background: #333; color: white; text-decoration: none; padding: 0.75rem 1.5rem; border-radius: 500px; font-size: 1rem; font-weight: bold; }
+        .back-btn:hover { background: #555; }
+        .container { max-width: 1000px; margin: 0 auto; }
+        .summary-box { background: #181818; padding: 2rem; border-radius: 1rem; margin-bottom: 2rem; }
+        .summary-title { font-size: 1.5rem; color: #1DB954; margin-bottom: 1rem; }
+        .summary-subtitle { color: #aaa; font-size: 0.95rem; margin-bottom: 1.5rem; }
+        .stats { display: flex; flex-wrap: wrap; gap: 1rem; margin-bottom: 1rem; }
+        .stat { background: #282828; padding: 1rem 1.5rem; border-radius: 0.5rem; font-size: 1rem; }
+        .results-box { background: #181818; padding: 2rem; border-radius: 1rem; margin-bottom: 2rem; }
+        .results-box h3 { margin-top: 0; margin-bottom: 1rem; border-bottom: 1px solid #282828; padding-bottom: 0.5rem; }
+        .song-list { max-height: 400px; overflow-y: auto; background: #121212; padding: 1rem; border-radius: 8px; list-style-type: none; margin: 0; }
+        .song-list li { padding: 0.75rem 0; border-bottom: 1px solid #282828; }
+        .song-list li:last-child { border-bottom: none; }
+        .song-name { font-weight: bold; color: #fff; }
+        .song-artists { color: #b3b3b3; }
+        .song-reason { color: #888; font-size: 0.85rem; margin-top: 0.25rem; }
+        .warning-box { border-left: 3px solid #FFA500; }
+        .warning-box h3 { color: #FFA500; }
+        .error-box { background: #181818; padding: 2rem; border-radius: 1rem; border-left: 3px solid #FF4500; }
+        .error-box h3 { color: #FF4500; margin-top: 0; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div class="title">{{ logo|safe }}<h1>Filter Results</h1></div>
+        <a href="{{ url_for('index') }}" class="back-btn">← Back to Filter</a>
+    </div>
+    <div class="container">
+        {% if error %}
+        <div class="error-box"><h3>❌ An Error Occurred</h3><p>{{ error }}</p></div>
+        {% elif results %}
+        <div class="summary-box">
+            <div class="summary-title">
+                {% if results.actual_removals > 0 %}✅ Removed {{ results.actual_removals }} songs from "{{ playlist_name }}"
+                {% else %}✅ No songs to remove from "{{ playlist_name }}"{% endif %}
+            </div>
+            {% if results.actual_removals != results.unique_tracks %}
+            <div class="summary-subtitle">({{ results.unique_tracks }} unique tracks, {{ results.actual_removals - results.unique_tracks }} were duplicates in playlist)</div>
+            {% endif %}
+            <div class="stats">
+                {% if results.unavailable_count > 0 %}<div class="stat">🚫 {{ results.unavailable_count }} unavailable</div>{% endif %}
+                {% if results.exact_count > 0 %}<div class="stat">✓ {{ results.exact_count }} exact matches</div>{% endif %}
+                {% if results.fuzzy_count > 0 %}<div class="stat">🔄 {{ results.fuzzy_count }} fuzzy duplicates</div>{% endif %}
+                {% if results.internal_count > 0 %}<div class="stat">📋 {{ results.internal_count }} internal duplicates</div>{% endif %}
+            </div>
+        </div>
+        {% if results.removal_details %}
+        <div class="results-box">
+            <h3>Removed Songs ({{ results.removal_details|length }})</h3>
+            <ul class="song-list">
+                {% for song in results.removal_details %}
+                <li><span class="song-name">{{ song.name }}</span><span class="song-artists"> - {{ song.artists }}</span><div class="song-reason">{{ song.reason }}</div></li>
+                {% endfor %}
+            </ul>
+        </div>
+        {% endif %}
+        {% if results.warnings %}
+        <div class="results-box warning-box">
+            <h3>⚠️ Potential Duplicates (not removed) - {{ results.warnings_total }} total</h3>
+            <p style="color: #aaa; font-size: 0.9rem; margin-bottom: 1rem;">These songs are similar but didn't meet the threshold for automatic removal.</p>
+            <ul class="song-list">
+                {% for warning in results.warnings %}
+                <li><span class="song-name">{{ warning.name }}</span><span class="song-artists"> - {{ warning.artists }}</span><div class="song-reason" style="color: #FFA500;">Similar to "{{ warning.similar_to }}" ({{ warning.score }}pts: {{ warning.reasons }})</div></li>
+                {% endfor %}
+                {% if results.warnings_total > 30 %}<li style="color: #aaa;">...and {{ results.warnings_total - 30 }} more warnings</li>{% endif %}
+            </ul>
+        </div>
+        {% endif %}
+        {% endif %}
+    </div>
 </body>
 </html>
 """
