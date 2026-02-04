@@ -162,10 +162,6 @@ def run_filter():
             )
         
         playlist_name = sp.playlist(target_playlist_id, fields='name')['name']
-        
-        # Get user's market for availability checking
-        user_info = sp.current_user()
-        user_market = user_info.get('country', 'US')
 
         # 3. Fetch target playlist tracks with full details
         target_tracks = []
@@ -176,8 +172,7 @@ def run_filter():
                 target_playlist_id, 
                 limit=100, 
                 offset=offset,
-                fields="items(track(id,name,duration_ms,artists(id,name),external_ids,is_playable,is_local)),next",
-                market=user_market
+                fields="items(track(id,name,duration_ms,artists(id,name),external_ids,is_playable,is_local)),next"
             )
             if not results['items']:
                 break
